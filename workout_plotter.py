@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-workout_time_series_plots.py
+workout_time_series_plots.py (with trend lines)
 
 Usage:
     python workout_time_series_plots.py path/to/export.csv
@@ -12,11 +12,14 @@ Metrics produced per exercise:
     - heaviest_weight.png   (daily maximum weight used)
     - total_volume.png      (daily sum of weight * reps)
 
+This version adds a simple linear trend line (least-squares) to each time-series plot.
+If there are >= 2 data points the script fits a straight line (numpy.polyfit) on the
+matplotlib date numbers; if there is exactly 1 data point it draws a horizontal dashed
+line at that value.
+
 Notes:
-    - The script expects a CSV-like export with fields similar to your sample.
-      It is robust to missing columns and quoted fields.
-    - The script extracts the date from the 'start' column (column index 1 in sample).
-      If the format differs you can supply --date-col or adjust code.
+ - The script expects a CSV-like export with fields similar to your sample.
+ - It is robust to missing columns and quoted fields.
 """
 
 from pathlib import Path
@@ -28,6 +31,8 @@ from datetime import datetime
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import numpy as np
+
 
 def parse_csv_file(path, date_col_index=1, exercise_col_index=4, weight_col_index=9, reps_col_index=10):
     """Read a CSV-like file without header, return DataFrame with parsed fields."""
@@ -99,6 +104,7 @@ def parse_csv_file(path, date_col_index=1, exercise_col_index=4, weight_col_inde
 
     return df_parsed
 
+
 def epley_one_rm(weight, reps):
     """Epley formula: 1RM = w * (1 + reps / 30). Returns NaN if invalid."""
     if weight is None or reps is None:
@@ -108,6 +114,7 @@ def epley_one_rm(weight, reps):
     if reps <= 0:
         return float("nan")
     return float(weight) * (1.0 + float(reps) / 30.0)
+
 
 def aggregate_metrics(df):
     """Given parsed df with columns date, exercise, weight, reps, compute per-exercise per-date metrics.
@@ -136,10 +143,12 @@ def aggregate_metrics(df):
     # replace NaN best_1rm/ heaviest with NaN (already) and keep them
     return grouped
 
+
 def safe_name(s):
     return "".join(c if (c.isalnum() or c in " _-()") else "_" for c in s).strip()[:120]
 
-def plot_time_series(grouped_df, output_dir, exercise, metric_col, metric_label):
+
+def plot_time_series(grouped_df, output_dir, exercise, metric_col, metric_label, trend_degree):
     """Plot a single metric for a single exercise across dates and save PNG.
     grouped_df: DataFrame filtered to the exercise with columns date and metric_col."""
     p = Path(output_dir)
@@ -173,6 +182,38 @@ def plot_time_series(grouped_df, output_dir, exercise, metric_col, metric_label)
         except Exception:
             pass
 
+    # Add polynomial trend line (fit on matplotlib date numbers)
+    x_all = mdates.date2num(dates.dt.to_pydatetime())
+    y_all = values.to_numpy(dtype=float)
+    valid_mask = ~np.isnan(y_all)
+    x_valid = x_all[valid_mask]
+    y_valid = y_all[valid_mask]
+
+    n_points = len(x_valid)
+    if n_points >= 2:
+        # choose the degree we can actually fit: at most n_points-1
+        fit_deg = int(min(trend_degree, max(1, n_points - 1)))
+        try:
+            coeff = np.polyfit(x_valid, y_valid, fit_deg)
+            y_fit = np.polyval(coeff, x_all)
+            # plot trend as dashed line; if fit_deg>1, label it with degree
+            if fit_deg == 1:
+                ax.plot(dates, y_fit, linestyle="--", linewidth=1)
+            else:
+                ax.plot(dates, y_fit, linestyle="--", linewidth=1, label=f"poly deg={fit_deg}")
+                ax.legend()
+        except Exception:
+            # fallback: if fit fails, try linear fit
+            try:
+                coeff = np.polyfit(x_valid, y_valid, 1)
+                y_fit = np.polyval(coeff, x_all)
+                ax.plot(dates, y_fit, linestyle="--", linewidth=1)
+            except Exception:
+                pass
+    elif n_points == 1:
+        # single data point: draw a horizontal dashed line at that value
+        ax.axhline(y=float(y_valid[0]), linestyle="--", linewidth=1)
+
     ax.set_title(f"{exercise} — {metric_label}")
     ax.set_xlabel("Date")
     ax.set_ylabel(metric_label)
@@ -184,7 +225,8 @@ def plot_time_series(grouped_df, output_dir, exercise, metric_col, metric_label)
     plt.close()
     return out_path
 
-def produce_plots(input_csv, output_dir="plots_by_exercise", date_col_index=1, exercise_col_index=4, weight_col_index=9, reps_col_index=10):
+
+def produce_plots(input_csv, output_dir="plots_by_exercise", date_col_index=1, exercise_col_index=4, weight_col_index=9, reps_col_index=10, trend_degree=2):
     df = parse_csv_file(input_csv, date_col_index, exercise_col_index, weight_col_index, reps_col_index)
     agg = aggregate_metrics(df)
     if agg.empty:
@@ -208,10 +250,11 @@ def produce_plots(input_csv, output_dir="plots_by_exercise", date_col_index=1, e
             # if column doesn't exist fill with NaN
             if col not in g.columns:
                 g[col] = float("nan")
-            out_path = plot_time_series(g[["date", col]], ex_dir, exercise, col, label)
+            out_path = plot_time_series(g[["date", col]], ex_dir, exercise, col, label, trend_degree)
             created_files.append(str(out_path))
     print(f"Created {len(created_files)} plot files in '{output_dir}'. Example file: {created_files[0] if created_files else 'none'}")
     return created_files
+
 
 def main():
     parser = argparse.ArgumentParser(description="Produce time-series plots per exercise/metric from workout export.")
@@ -221,9 +264,11 @@ def main():
     parser.add_argument("--exercise-col", type=int, default=4, help="zero-based column index of exercise name (default 4)")
     parser.add_argument("--weight-col", type=int, default=9, help="zero-based column index of weight (default 9)")
     parser.add_argument("--reps-col", type=int, default=10, help="zero-based column index of reps (default 10)")
+    parser.add_argument("--trend-degree", type=int, default=2, help="polynomial degree of trend line (default 2)")
     args = parser.parse_args()
 
-    produce_plots(args.input_csv, args.output_dir, args.date_col, args.exercise_col, args.weight_col, args.reps_col)
+    produce_plots(args.input_csv, args.output_dir, args.date_col, args.exercise_col, args.weight_col, args.reps_col, args.trend_degree)
+
 
 if __name__ == "__main__":
     main()
